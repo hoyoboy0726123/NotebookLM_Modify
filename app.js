@@ -291,7 +291,7 @@ async function processFile(file) {
         const arrayBuffer = await file.arrayBuffer();
         const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
 
-        const totalPages = Math.min(pdf.numPages, 20); // 最多 20 頁
+        const totalPages = pdf.numPages; // 無頁數限制（原限制：Math.min(pdf.numPages, 20)）
         DOM.totalPages.textContent = totalPages;
 
         AppState.pages = [];
@@ -821,7 +821,12 @@ function setupCanvasDrawing(page) {
                     fontFamily: 'Noto Sans TC, sans-serif',
                     color: colors.textColor,
                     bgColor: colors.bgColor,
-                    isEdited: true
+                    isEdited: true,
+                    // 初始化不可移動的背景遮罩座標
+                    maskX: x,
+                    maskY: y,
+                    maskWidth: width,
+                    maskHeight: height
                 };
 
                 // 打開編輯對話框讓用戶輸入文字
@@ -1068,21 +1073,29 @@ function renderPageToCanvas(page) {
         if (page.textBoxes) {
             page.textBoxes.forEach(box => {
                 if (box.isEdited) {
-                    // 1. 使用背景色覆蓋原有內容
+                    // 1. 使用背景色覆蓋原有內容 (使用 maskX/Y 固定遮罩位置)
+                    // 如果有 maskX 則使用它，否則回退到 box.x (相容舊資料或尚未初始化的情況)
+                    const maskX = box.maskX !== undefined ? box.maskX : box.x;
+                    const maskY = box.maskY !== undefined ? box.maskY : box.y;
+                    const maskW = box.maskWidth !== undefined ? box.maskWidth : box.width;
+                    const maskH = box.maskHeight !== undefined ? box.maskHeight : box.height;
+
                     ctx.fillStyle = box.bgColor || '#f0f0f0';
                     ctx.fillRect(
-                        box.x * scale,
-                        box.y * scale,
-                        box.width * scale,
-                        box.height * scale
+                        maskX * scale,
+                        maskY * scale,
+                        maskW * scale,
+                        maskH * scale
                     );
 
                     // 2. 如果有文字，繪製文字（垂直置中）
+                    // 文字跟隨 box.x/y 移動 (UI 框框的位置)
                     if (box.text && !box.isCoverOnly) {
                         ctx.fillStyle = box.color || '#000000';
                         const fontWeight = box.isBold !== false ? 'bold' : 'normal';
                         ctx.font = `${fontWeight} ${box.fontSize * scale}px ${box.fontFamily}`;
                         ctx.textBaseline = 'middle';
+
                         ctx.fillText(
                             box.text,
                             box.x * scale + 4,
@@ -1172,6 +1185,15 @@ function createTextOverlay(box, displayScale, pageScale) {
         startTop = parseFloat(div.style.top);
         div.style.cursor = 'grabbing';
 
+        // 懶加載初始化 Mask 座標 (如果尚未設定，例如載入舊存檔)
+        // 鎖定當前位置為 Mask 位置
+        if (box.maskX === undefined) {
+            box.maskX = box.x;
+            box.maskY = box.y;
+            box.maskWidth = box.width;
+            box.maskHeight = box.height;
+        }
+
         // 確保框框獲得焦點
         div.focus();
 
@@ -1243,8 +1265,17 @@ function createTextOverlay(box, displayScale, pageScale) {
 
     // 方向鍵微調位置
     div.addEventListener('keydown', (e) => {
-        const step = e.shiftKey ? 10 : 1; // 按住 Shift 一次移動 10px
+        // 計算位移量（像素）
+        const step = e.shiftKey ? 10 : 1;
         let moved = false;
+
+        // 懶加載初始化 Mask 座標 (如果尚未設定)
+        if (box.maskX === undefined) {
+            box.maskX = box.x;
+            box.maskY = box.y;
+            box.maskWidth = box.width;
+            box.maskHeight = box.height;
+        }
 
         switch (e.key) {
             case 'ArrowUp':
@@ -1267,12 +1298,15 @@ function createTextOverlay(box, displayScale, pageScale) {
 
         if (moved) {
             e.preventDefault();
-            // 更新 box 座標
+
+            // 更新 box 座標（文字與 UI 框框移動）
+            // 注意：maskX/maskY 沒有更新，所以背景遮罩會留在原地
             const page = AppState.pages[AppState.currentPageIndex];
             box.x = parseFloat(div.style.left) / ratio;
             box.y = parseFloat(div.style.top) / ratio;
-            // 重新繪製 Canvas
+
             renderPageToCanvas(page);
+            showToast('已微調文字位置（背景保持固定）');
         }
     });
 
@@ -1443,6 +1477,13 @@ function saveEdit() {
         newBox.isBold = isBold;
         newBox.isEdited = true;
 
+        // 初始化不可移動的背景遮罩座標
+        // 這些座標一旦設定後，即使 box.x/box.y (文字位置) 改變，遮罩也不會動
+        newBox.maskX = newBox.x;
+        newBox.maskY = newBox.y;
+        newBox.maskWidth = newBox.width;
+        newBox.maskHeight = newBox.height;
+
         if (newText.trim()) {
             // 有文字：正常文字框
             newBox.text = newText;
@@ -1474,6 +1515,14 @@ function saveEdit() {
             box.bgColor = bgColor;  // 保存背景色
             box.isBold = isBold;  // 保存粗體設定
             box.isEdited = true;
+
+            // 如果遮罩座標尚未初始化 (例如舊資料)，則初始化為當前位置
+            if (box.maskX === undefined) {
+                box.maskX = box.x;
+                box.maskY = box.y;
+                box.maskWidth = box.width;
+                box.maskHeight = box.height;
+            }
 
             // 更新顯示
             renderPageToCanvas(page);
@@ -1665,9 +1714,14 @@ async function downloadEditedPDF() {
             if (page.textBoxes) {
                 page.textBoxes.forEach(box => {
                     if (box.isEdited) {
-                        // 使用背景色覆蓋原有內容
+                        // 使用背景色覆蓋原有內容 (使用 maskX/Y 固定遮罩位置)
+                        const maskX = box.maskX !== undefined ? box.maskX : box.x;
+                        const maskY = box.maskY !== undefined ? box.maskY : box.y;
+                        const maskW = box.maskWidth !== undefined ? box.maskWidth : box.width;
+                        const maskH = box.maskHeight !== undefined ? box.maskHeight : box.height;
+
                         ctx.fillStyle = box.bgColor || '#f0f0f0';
-                        ctx.fillRect(box.x, box.y, box.width, box.height);
+                        ctx.fillRect(maskX, maskY, maskW, maskH);
 
                         // 如果有文字（非純遮蓋），繪製文字
                         if (box.text && !box.isCoverOnly) {
@@ -1675,6 +1729,8 @@ async function downloadEditedPDF() {
                             const fontWeight = box.isBold !== false ? 'bold' : 'normal';
                             ctx.font = `${fontWeight} ${box.fontSize}px ${box.fontFamily || 'Noto Sans TC, sans-serif'}`;
                             ctx.textBaseline = 'middle';
+
+                            // 文字使用 box.x/y (已微調後的位置)
                             ctx.fillText(box.text, box.x + 4, box.y + box.height / 2);
                         }
                     }
