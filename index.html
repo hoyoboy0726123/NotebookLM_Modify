@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="NotebookLM 簡報編輯器 - 輕鬆修改 PDF 簡報內容。上傳 PDF，智能辨識，即時編輯，一鍵下載。">
+    <meta name="keywords" content="NotebookLM, PDF編輯器, 簡報編輯, OCR, 文字辨識">
+    <title>NotebookLM 簡報文字編輯器 | 輕鬆修改 PDF 簡報內容</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+TC:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-container">
+            <div class="logo">
+                <div class="logo-icon">
+                    <span class="logo-bracket">[</span>
+                    <span class="logo-n">N</span>
+                    <span class="logo-bracket">]</span>
+                </div>
+                <h1 class="logo-text">
+                    <span class="logo-title">NotebookLM</span>
+                    <span class="logo-subtitle">簡報編輯器</span>
+                </h1>
+            </div>
+
+            <!-- Header 功能區 -->
+            <div class="header-actions" id="headerActions">
+                <button class="help-btn" id="helpBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                        <line x1="12" y1="17" x2="12.01" y2="17"></line>
+                    </svg>
+                    使用說明
+                </button>
+                <button class="import-pdf-btn" id="importPdfBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="17 8 12 3 7 8" />
+                        <line x1="12" y1="3" x2="12" y2="15" />
+                    </svg>
+                    匯入 PDF
+                </button>
+                <button class="export-pdf-btn" id="exportPdfBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    匯出 PDF
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main App Section -->
+    <main class="main-app" id="app-section">
+        <div class="app-container">
+            <!-- Subtitle -->
+
+
+            <!-- Auth Section 已移除，無需登入 -->
+
+            <!-- Editor Section (登入後顯示) -->
+            <div class="editor-section hidden" id="editorSection">
+                <!-- Upload Area -->
+                <div class="upload-area" id="uploadArea">
+                    <div class="upload-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                            <polyline points="17 8 12 3 7 8" />
+                            <line x1="12" y1="3" x2="12" y2="15" />
+                        </svg>
+                        <p class="upload-text">點擊或拖曳檔案上傳</p>
+                        <p class="upload-hint">支援 PDF 格式，最多 20 頁</p>
+                    </div>
+                    <input type="file" id="fileInput" accept=".pdf" hidden>
+                </div>
+
+                <!-- Processing State -->
+                <div class="processing-area hidden" id="processingArea">
+                    <div class="spinner"></div>
+                    <p class="processing-text">正在載入 PDF，請稍候...</p>
+                    <p class="processing-progress">處理頁面 <span id="currentPage">0</span>/<span id="totalPages">0</span>
+                    </p>
+                </div>
+
+                <!-- Page Thumbnails (上傳後的頁面選取) -->
+                <div class="thumbnails-area hidden" id="thumbnailsArea">
+                    <h3 class="thumbnails-title">請點選要修改的頁面，按「開始編輯」進入編輯模式</h3>
+                    <div class="thumbnails-grid" id="thumbnailsGrid">
+                        <!-- 縮圖會動態生成 -->
+                    </div>
+                </div>
+
+                <!-- Editor Canvas - 三欄佈局 -->
+                <div class="editor-layout hidden" id="editorLayout">
+                    <div class="editor-header">
+                        <button class="back-btn" id="backToThumbnails">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="15 18 9 12 15 6" />
+                            </svg>
+                            返回選擇頁面
+                        </button>
+                        <h3 class="canvas-title">編輯模式</h3>
+                        <p class="canvas-hint">在圖片上拖曳框選要修改的區域</p>
+                    </div>
+
+                    <div class="editor-content editor-three-column">
+                        <!-- 左側：頁面導航區（縮圖） -->
+                        <div class="page-navigator" id="pageNavigator">
+                            <div class="nav-header">
+                                <h4>頁面</h4>
+                            </div>
+                            <div class="page-thumbnails-list" id="pageThumbnailsList">
+                                <!-- 動態生成頁面縮圖 -->
+                            </div>
+                        </div>
+
+                        <!-- 中央：PDF 預覽與編輯區 -->
+                        <div class="editor-center">
+                            <!-- 縮放工具列 -->
+                            <div class="zoom-toolbar" id="zoomToolbar">
+                                <button class="zoom-btn" id="zoomOut" title="縮小">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="11" cy="11" r="8" />
+                                        <line x1="8" y1="11" x2="14" y2="11" />
+                                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                    </svg>
+                                </button>
+                                <span class="zoom-level" id="zoomLevel">100%</span>
+                                <button class="zoom-btn" id="zoomIn" title="放大">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="11" cy="11" r="8" />
+                                        <line x1="11" y1="8" x2="11" y2="14" />
+                                        <line x1="8" y1="11" x2="14" y2="11" />
+                                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                                    </svg>
+                                </button>
+                                <button class="zoom-btn" id="zoomReset" title="重置縮放">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                                        <path d="M3 3v5h5" />
+                                    </svg>
+                                </button>
+                                <span class="zoom-hint">Ctrl+滾輪縮放 / 右鍵拖曳移動</span>
+                            </div>
+
+                            <!-- 可拖曳的預覽區域 -->
+                            <div class="pdf-viewport" id="pdfViewport">
+                                <div class="pdf-preview-container" id="pdfPreviewContainer">
+                                    <canvas id="editorCanvas"></canvas>
+                                    <div class="text-overlays" id="textOverlays"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 右側：辨識結果面板 -->
+                        <div class="editor-right">
+                            <div class="result-panel">
+                                <div class="result-header">
+                                    <h4>修改區域</h4>
+                                    <div class="result-count">
+                                        <span id="textBoxCount">0</span> 個文字區域
+                                        <button class="visibility-toggle" id="toggleVisibility" title="顯示/隱藏文字框">
+                                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                                <circle cx="12" cy="12" r="3" />
+                                            </svg>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div class="result-hint">
+                                    <span class="hint-icon">✏️</span>
+                                    <span>在圖片上拖曳框選要覆蓋文字的區域</span>
+                                </div>
+
+                                <!-- 文字區域列表 -->
+                                <div class="text-list" id="textList">
+                                    <!-- 動態生成 -->
+                                </div>
+
+                                <!-- 下載區域 -->
+                                <div class="download-section">
+                                    <button class="download-btn" id="downloadBtn">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                            <polyline points="7 10 12 15 17 10" />
+                                            <line x1="12" y1="15" x2="12" y2="3" />
+                                        </svg>
+                                        匯出 PDF
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toast Notification -->
+    <div class="toast hidden" id="toast">
+        <p class="toast-message" id="toastMessage"></p>
+    </div>
+
+    <!-- 編輯對話框 -->
+    <div class="edit-modal hidden" id="editModal">
+        <div class="edit-modal-content">
+            <div class="edit-modal-header">
+                <h4>編輯文字</h4>
+                <button class="close-modal-btn" id="closeModalBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                </button>
+            </div>
+            <div class="edit-modal-body">
+                <label>原始文字：</label>
+                <p class="original-text" id="originalText"></p>
+                <label>修改為：</label>
+                <textarea id="editTextarea" rows="3"></textarea>
+
+                <!-- 字體樣式設定 -->
+                <div class="style-options">
+                    <div class="style-row">
+                        <label>字體大小：</label>
+                        <input type="range" id="fontSizeSlider" min="12" max="150" value="24">
+                        <span id="fontSizeValue">24px</span>
+                    </div>
+                    <div class="style-row">
+                        <label>文字顏色：</label>
+                        <input type="color" id="textColorPicker" value="#000000">
+                        <button type="button" id="pickTextColorBtn" class="pick-color-btn" title="從圖片吸取顏色">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16"
+                                height="16">
+                                <path d="M12 2v6m0 8v6M2 12h6m8 0h6" />
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="style-row">
+                        <label>背景顏色：</label>
+                        <input type="color" id="bgColorPicker" value="#f0f0f0">
+                        <button type="button" id="pickBgColorBtn" class="pick-color-btn" title="從圖片吸取顏色">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16"
+                                height="16">
+                                <path d="M12 2v6m0 8v6M2 12h6m8 0h6" />
+                            </svg>
+                        </button>
+                    </div>
+                    <div class="style-row">
+                        <label>粗體：</label>
+                        <input type="checkbox" id="boldCheckbox" checked>
+                        <span style="margin-left: 4px;">強制粗體</span>
+                    </div>
+                </div>
+            </div>
+            <div class="edit-modal-footer">
+                <button class="cancel-btn" id="cancelEditBtn">取消</button>
+                <button class="save-btn" id="saveEditBtn">儲存</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 使用說明 Modal -->
+    <div class="edit-modal-backdrop hidden" id="helpModal">
+        <div class="edit-modal" style="width: 600px; max-width: 90vw;">
+            <div class="edit-modal-header">
+                <h3>使用說明</h3>
+                <button class="close-modal-btn" id="closeHelpBtn">&times;</button>
+            </div>
+            <div class="edit-modal-content" style="padding: 20px; line-height: 1.6; color: var(--text-primary);">
+                <div class="help-section">
+                    <h4 style="color: var(--color-primary); margin-bottom: 10px;">✨ 核心功能</h4>
+                    <ul style="padding-left: 20px; margin-bottom: 20px;">
+                        <li><strong>文字編輯</strong>：在頁面上框選任意區域，AI 會自動辨識文字。</li>
+                        <li><strong>智能覆蓋</strong>：輸入新文字後，系統會自動使用背景色覆蓋舊文字，並加上新文字。</li>
+                        <li style="color: var(--color-orange); font-weight: 500;"><strong>移除可見圖標/Logo</strong>：框選該區域 →
+                            使用吸管吸取背景色 → <strong>清空文字框（不輸入文字）</strong> → 點擊儲存，即可完美遮蓋任何圖案（如 NotebookLM 圖標）。</li>
+                    </ul>
+                </div>
+
+                <div class="help-section">
+                    <h4 style="color: var(--color-orange); margin-bottom: 10px;">🎨 顏色吸取（解決色差問題）</h4>
+                    <p style="margin-bottom: 10px;">當自動識別的背景色不準確（例如有漸層或雜訊）時，請使用吸管工具：</p>
+                    <ol style="padding-left: 20px; margin-bottom: 20px;">
+                        <li>在編輯框點擊 <strong style="color: var(--color-primary);">吸管圖示 (+)</strong>。</li>
+                        <li>滑鼠游標會變成十字準心。</li>
+                        <li><strong>按住 Ctrl + 滾輪</strong> 可放大圖片，精確找到最適合的純色背景區域。</li>
+                        <li>點擊圖片上的目標顏色完成吸取，編輯器會自動恢復原始大小。</li>
+                    </ol>
+                </div>
+
+                <div class="help-section">
+                    <h4 style="color: var(--text-secondary); margin-bottom: 10px;">💡 小技巧</h4>
+                    <ul style="padding-left: 20px;">
+                        <li><strong>放大編輯</strong>：編輯文字時無法使用框選，若需精確框選請先在 100% 縮放比例下操作。</li>
+                        <li>如果在放大模式下嘗試框選，系統會自動跳回 100% 以確保框選準確。</li>
+                        <li>匯出 PDF 時會保留所有頁面，僅修改您編輯過的區域。</li>
+                    </ul>
+                </div>
+            </div>
+            <div class="edit-modal-footer">
+                <button class="save-btn" id="closeHelpBtnBottom">我知道了</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/4.1.1/tesseract.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
