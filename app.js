@@ -11,21 +11,34 @@
 // ============================================
 // 全域狀態
 // ============================================
+/**
+ * 應用狀態管理
+ */
 const AppState = {
     isLoggedIn: false,
     user: null,
     currentFile: null,
-    pages: [],
+    pages: [],           // 儲存每一頁的資訊 (imageData, textBoxes)
     currentPageIndex: -1,
     textBoxes: [],
-    activeTextBoxId: null,
+    activeTextBoxId: null, // 當前正在編輯的文本框 ID
     language: 'zh-TW',
     isFavorite: false,
     showTextBoxes: true,
-    isNewBoxMode: false,      // 是否在新增框選模式
-    pendingNewBox: null,      // 待新增的文字框
-    isPreviewMode: false,     // 預覽模式（隱藏邊框）
-    zoomLevel: 1              // 縮放比例（1 = 100%）
+    isNewBoxMode: false,   // 是否為新增文本框模式
+    pendingNewBox: null,   // 待新增的文本框數據
+    isPreviewMode: false,
+    zoomLevel: 100,      // 縮放比例 (100 = 100%)
+    isProcessing: false,   // 是否正在處理中
+    ocrWorker: null,       // Tesseract Worker 實例
+
+    // 歷史紀錄
+    history: [],           // 撤銷堆疊
+    redoStack: [],         // 重做堆疊
+    maxHistorySize: 50,    // 最大紀錄步數
+
+    // 新增模式狀態
+    colorPickingMode: null // 'text', 'bg', 'new_cover'
 };
 
 // ============================================
@@ -37,6 +50,11 @@ const DOM = {
     importPdfBtn: document.getElementById('importPdfBtn'),
     exportPdfBtn: document.getElementById('exportPdfBtn'),
     helpBtn: document.getElementById('helpBtn'),
+
+    // Add Buttons (New)
+    addCoverBtn: document.getElementById('addCoverBtn'),
+    addHTextBtn: document.getElementById('addHTextBtn'),
+    addVTextBtn: document.getElementById('addVTextBtn'),
 
     // Help Modal
     helpModal: document.getElementById('helpModal'),
@@ -74,6 +92,8 @@ const DOM = {
     zoomOut: document.getElementById('zoomOut'),
     zoomReset: document.getElementById('zoomReset'),
     zoomLevel: document.getElementById('zoomLevel'),
+    undoBtn: document.getElementById('undoBtn'),
+    redoBtn: document.getElementById('redoBtn'),
 
     // Result Panel
     textBoxCount: document.getElementById('textBoxCount'),
@@ -140,21 +160,35 @@ function hideElement(element) {
 function rgbToHex(color) {
     if (!color) return '#000000';
 
-    // 如果已經是 hex 格式，直接返回
-    if (color.startsWith('#')) {
-        return color;
-    }
-
-    // 解析 rgb(r, g, b) 格式
-    const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (match) {
-        const r = parseInt(match[1]);
-        const g = parseInt(match[2]);
-        const b = parseInt(match[3]);
+    // 如果是物件 {r, g, b}
+    if (typeof color === 'object' && color !== null) {
+        const r = color.r !== undefined ? color.r : 0;
+        const g = color.g !== undefined ? color.g : 0;
+        const b = color.b !== undefined ? color.b : 0;
         return '#' + [r, g, b].map(x => {
-            const hex = x.toString(16);
+            const hex = parseInt(x).toString(16);
             return hex.length === 1 ? '0' + hex : hex;
         }).join('');
+    }
+
+    // 如果是字串
+    if (typeof color === 'string') {
+        // 如果已經是 hex 格式，直接返回
+        if (color.startsWith('#')) {
+            return color;
+        }
+
+        // 解析 rgb(r, g, b) 格式
+        const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+        if (match) {
+            const r = parseInt(match[1]);
+            const g = parseInt(match[2]);
+            const b = parseInt(match[3]);
+            return '#' + [r, g, b].map(x => {
+                const hex = x.toString(16);
+                return hex.length === 1 ? '0' + hex : hex;
+            }).join('');
+        }
     }
 
     return '#000000';
@@ -1080,27 +1114,56 @@ function renderPageToCanvas(page) {
                     const maskW = box.maskWidth !== undefined ? box.maskWidth : box.width;
                     const maskH = box.maskHeight !== undefined ? box.maskHeight : box.height;
 
-                    ctx.fillStyle = box.bgColor || '#f0f0f0';
-                    ctx.fillRect(
-                        maskX * scale,
-                        maskY * scale,
-                        maskW * scale,
-                        maskH * scale
-                    );
+                    // 僅當有背景色或為舊有遮罩時才繪製背景
+                    const isLegacyMask = box.maskX !== undefined;
+                    if (box.bgColor || isLegacyMask) {
+                        ctx.fillStyle = box.bgColor || '#ffffff';
+                        ctx.fillRect(
+                            maskX * scale,
+                            maskY * scale,
+                            maskW * scale,
+                            maskH * scale
+                        );
+                    }
 
                     // 2. 如果有文字，繪製文字（垂直置中）
                     // 文字跟隨 box.x/y 移動 (UI 框框的位置)
                     if (box.text && !box.isCoverOnly) {
                         ctx.fillStyle = box.color || '#000000';
                         const fontWeight = box.isBold !== false ? 'bold' : 'normal';
-                        ctx.font = `${fontWeight} ${box.fontSize * scale}px ${box.fontFamily}`;
-                        ctx.textBaseline = 'middle';
+                        ctx.font = `${fontWeight} ${box.fontSize * scale}px ${box.fontFamily || 'Noto Sans TC, sans-serif'}`;
 
-                        ctx.fillText(
-                            box.text,
-                            box.x * scale + 4,
-                            (box.y + box.height / 2) * scale
-                        );
+                        // 直排文字繪製邏輯
+                        if (box.isVertical) {
+                            ctx.textBaseline = 'top';
+                            ctx.textAlign = 'center';
+                            const fontSize = box.fontSize * scale;
+                            const lineHeight = fontSize; // 行高
+                            const lines = box.text.split('\n');
+
+                            // 直排從右到左繪製
+                            // 起始 X = 框框右邊界 - 半個字寬 - padding
+                            let startX = (box.x + box.width) * scale - (fontSize / 2) - 4;
+
+                            lines.forEach(line => {
+                                let startY = box.y * scale + 4; // 起始 Y
+                                for (let char of line) {
+                                    // 檢查是否為全形標點 (簡單處理，不旋轉)
+                                    ctx.fillText(char, startX, startY);
+                                    startY += lineHeight;
+                                }
+                                startX -= lineHeight * 1.2; // 下一行往左移
+                            });
+                        } else {
+                            // 橫排文字繪製邏輯 (維持原樣)
+                            ctx.textBaseline = 'middle';
+                            ctx.textAlign = 'left';
+                            ctx.fillText(
+                                box.text,
+                                box.x * scale + 4,
+                                (box.y + box.height / 2) * scale
+                            );
+                        }
                     }
                 }
             });
@@ -1134,7 +1197,7 @@ function renderTextOverlays(page) {
  */
 function createTextOverlay(box, displayScale, pageScale) {
     const div = document.createElement('div');
-    div.className = 'text-box' + (box.isEdited ? ' edited' : '');
+    div.className = 'text-box' + (box.isEdited ? ' edited' : '') + (box.isVertical ? ' vertical' : '');
     div.dataset.id = box.id;
 
     // 座標已經是按 pageScale 縮放的（在頁面圖片座標系中）
@@ -1187,12 +1250,7 @@ function createTextOverlay(box, displayScale, pageScale) {
 
         // 懶加載初始化 Mask 座標 (如果尚未設定，例如載入舊存檔)
         // 鎖定當前位置為 Mask 位置
-        if (box.maskX === undefined) {
-            box.maskX = box.x;
-            box.maskY = box.y;
-            box.maskWidth = box.width;
-            box.maskHeight = box.height;
-        }
+
 
         // 確保框框獲得焦點
         div.focus();
@@ -1234,6 +1292,13 @@ function createTextOverlay(box, displayScale, pageScale) {
             isDragging = false;
             div.style.cursor = 'move';
 
+            // 檢查是否真的移動了 (避免無意義的點擊觸發歷史紀錄)
+            // 這裡簡單檢查一下 style 與 box 原始值
+            // 不過既然 isDragging 為 true，通常表示mousemove觸發了
+
+            // 在更新 box 屬性前儲存歷史紀錄
+            saveHistory();
+
             // 更新 box 座標
             const page = AppState.pages[AppState.currentPageIndex];
             box.x = parseFloat(div.style.left) / ratio;
@@ -1245,11 +1310,23 @@ function createTextOverlay(box, displayScale, pageScale) {
         if (isResizing) {
             isResizing = false;
 
+            // 在更新 box 屬性前儲存歷史紀錄
+            saveHistory();
+
             // 更新 box 尺寸和字體大小
             const page = AppState.pages[AppState.currentPageIndex];
             box.width = parseFloat(div.style.width) / ratio;
             box.height = parseFloat(div.style.height) / ratio;
-            box.fontSize = Math.round(box.height * 0.7); // 字體大小約為高度的 70%
+
+            // 依據方向自動調整字體大小
+            if (box.isVertical) {
+                // 直排：依據寬度調整字級 (因為直排的高度是用來排版長度的)
+                box.fontSize = Math.round(box.width * 0.7);
+            } else {
+                // 橫排：依據高度調整字級
+                box.fontSize = Math.round(box.height * 0.7);
+            }
+
 
             // 重新繪製 Canvas
             renderPageToCanvas(page);
@@ -1270,7 +1347,7 @@ function createTextOverlay(box, displayScale, pageScale) {
         let moved = false;
 
         // 懶加載初始化 Mask 座標 (如果尚未設定)
-        if (box.maskX === undefined) {
+        if (box.maskX === undefined && !box.isFreeFloating) {
             box.maskX = box.x;
             box.maskY = box.y;
             box.maskWidth = box.width;
@@ -1326,8 +1403,8 @@ function renderTextList(page) {
 
         item.innerHTML = `
             <div class="item-content">
-                <span class="item-number">${box.index}</span>
-                <span class="item-text">${escapeHtml(box.text)}</span>
+                <span class="item-number">${box.index || '自訂'}</span>
+                <span class="item-text">${escapeHtml(box.text || '(無內容)')}</span>
                 ${box.isEdited ? '<span class="item-status">已修改</span>' : ''}
             </div>
             <button class="delete-item-btn" title="刪除此修改">
@@ -1361,6 +1438,7 @@ function renderTextList(page) {
  * 刪除文字框
  */
 function deleteTextBox(boxId) {
+    saveHistory();
     const page = AppState.pages[AppState.currentPageIndex];
     const index = page.textBoxes.findIndex(b => b.id === boxId);
 
@@ -1461,6 +1539,9 @@ function closeEditModal() {
  * 儲存編輯
  */
 function saveEdit() {
+    // 在修改前儲存歷史紀錄
+    saveHistory();
+
     const page = AppState.pages[AppState.currentPageIndex];
     const newText = DOM.editTextarea.value;
     const fontSize = parseInt(DOM.fontSizeSlider.value) || 24;
@@ -1477,12 +1558,7 @@ function saveEdit() {
         newBox.isBold = isBold;
         newBox.isEdited = true;
 
-        // 初始化不可移動的背景遮罩座標
-        // 這些座標一旦設定後，即使 box.x/box.y (文字位置) 改變，遮罩也不會動
-        newBox.maskX = newBox.x;
-        newBox.maskY = newBox.y;
-        newBox.maskWidth = newBox.width;
-        newBox.maskHeight = newBox.height;
+
 
         if (newText.trim()) {
             // 有文字：正常文字框
@@ -1517,7 +1593,8 @@ function saveEdit() {
             box.isEdited = true;
 
             // 如果遮罩座標尚未初始化 (例如舊資料)，則初始化為當前位置
-            if (box.maskX === undefined) {
+            // 新增的物件 (isFreeFloating) 不應產生 Mask
+            if (box.maskX === undefined && !box.isFreeFloating) {
                 box.maskX = box.x;
                 box.maskY = box.y;
                 box.maskWidth = box.width;
@@ -1720,18 +1797,41 @@ async function downloadEditedPDF() {
                         const maskW = box.maskWidth !== undefined ? box.maskWidth : box.width;
                         const maskH = box.maskHeight !== undefined ? box.maskHeight : box.height;
 
-                        ctx.fillStyle = box.bgColor || '#f0f0f0';
-                        ctx.fillRect(maskX, maskY, maskW, maskH);
+                        // 僅當有背景色或為舊有遮罩時才繪製背景
+                        const isLegacyMask = box.maskX !== undefined;
+                        if (box.bgColor || isLegacyMask) {
+                            ctx.fillStyle = box.bgColor || '#ffffff';
+                            ctx.fillRect(maskX, maskY, maskW, maskH);
+                        }
 
                         // 如果有文字（非純遮蓋），繪製文字
                         if (box.text && !box.isCoverOnly) {
                             ctx.fillStyle = box.color || '#000000';
                             const fontWeight = box.isBold !== false ? 'bold' : 'normal';
                             ctx.font = `${fontWeight} ${box.fontSize}px ${box.fontFamily || 'Noto Sans TC, sans-serif'}`;
-                            ctx.textBaseline = 'middle';
 
-                            // 文字使用 box.x/y (已微調後的位置)
-                            ctx.fillText(box.text, box.x + 4, box.y + box.height / 2);
+                            if (box.isVertical) {
+                                ctx.textBaseline = 'top';
+                                ctx.textAlign = 'center';
+                                const fontSize = box.fontSize;
+                                const lineHeight = fontSize;
+                                const lines = box.text.split('\n');
+
+                                let startX = (box.x + box.width) - (fontSize / 2) - 4;
+
+                                lines.forEach(line => {
+                                    let startY = box.y + 4;
+                                    for (let char of line) {
+                                        ctx.fillText(char, startX, startY);
+                                        startY += lineHeight;
+                                    }
+                                    startX -= lineHeight * 1.2;
+                                });
+                            } else {
+                                ctx.textBaseline = 'middle';
+                                ctx.textAlign = 'left';
+                                ctx.fillText(box.text, box.x + 4, box.y + box.height / 2);
+                            }
                         }
                     }
                 });
@@ -1857,7 +1957,7 @@ function init() {
             if (e.target === DOM.helpModal) hideElement(DOM.helpModal);
         });
     }
-    DOM.backToThumbnails.addEventListener('click', backToThumbnails);
+
     DOM.downloadBtn.addEventListener('click', downloadEditedPDF);
 
     // 匯入 PDF 按鈕（觸發文件選擇器）
@@ -1892,6 +1992,9 @@ function init() {
     if (DOM.zoomReset) {
         DOM.zoomReset.addEventListener('click', () => setZoom(1));
     }
+    // Undo / Redo 按鈕
+    if (DOM.undoBtn) DOM.undoBtn.addEventListener('click', undo);
+    if (DOM.redoBtn) DOM.redoBtn.addEventListener('click', redo);
 
     // 滾輪縮放
     if (DOM.pdfViewport) {
@@ -1954,52 +2057,36 @@ function init() {
     DOM.cancelEditBtn.addEventListener('click', closeEditModal);
     DOM.saveEditBtn.addEventListener('click', saveEdit);
 
-    // 吸取顏色功能
-    let colorPickMode = null; // 'text' 或 'bg'
+    // 吸取顏色功能 & 新增物件功能
+    // let colorPickMode = null; // 已移至 AppState.colorPickingMode
 
+    // 綁定吸取按鈕
     if (DOM.pickTextColorBtn) {
-        DOM.pickTextColorBtn.addEventListener('click', () => {
-            colorPickMode = 'text';
-            // 暫時隱藏對話框
-            DOM.editModal.style.opacity = '0';
-            DOM.editModal.style.pointerEvents = 'none';
-            // 設定準心游標
-            DOM.editorCanvas.style.cursor = 'crosshair';
-            document.body.classList.add('color-picking');
-            showToast('點擊圖片吸取文字顏色｜Ctrl+滾輪縮放｜ESC 取消');
-        });
+        DOM.pickTextColorBtn.addEventListener('click', () => startColorPicking('text'));
     }
-
     if (DOM.pickBgColorBtn) {
-        DOM.pickBgColorBtn.addEventListener('click', () => {
-            colorPickMode = 'bg';
-            // 暫時隱藏對話框
-            DOM.editModal.style.opacity = '0';
-            DOM.editModal.style.pointerEvents = 'none';
-            // 設定準心游標
-            DOM.editorCanvas.style.cursor = 'crosshair';
-            document.body.classList.add('color-picking');
-            showToast('點擊圖片吸取背景顏色｜Ctrl+滾輪縮放｜ESC 取消');
+        DOM.pickBgColorBtn.addEventListener('click', () => startColorPicking('bg'));
+    }
+
+    // 綁定新增按鈕
+    if (DOM.addCoverBtn) {
+        DOM.addCoverBtn.addEventListener('click', () => {
+            startColorPicking('new_cover');
+            showToast('請點擊圖片吸取背景顏色，將自動產生遮罩');
         });
     }
-
-    // 取消吸取模式的函數
-    function cancelColorPicking() {
-        colorPickMode = null;
-        DOM.editModal.style.opacity = '';
-        DOM.editModal.style.pointerEvents = '';
-        DOM.editorCanvas.style.cursor = '';
-        document.body.classList.remove('color-picking');
-        if (DOM.pickTextColorBtn) DOM.pickTextColorBtn.classList.remove('active');
-        if (DOM.pickBgColorBtn) DOM.pickBgColorBtn.classList.remove('active');
-
-        // 回到 100% 縮放
-        setZoom(1);
+    if (DOM.addHTextBtn) {
+        DOM.addHTextBtn.addEventListener('click', () => startAddText(false));
     }
+    if (DOM.addVTextBtn) {
+        DOM.addVTextBtn.addEventListener('click', () => startAddText(true));
+    }
+
+
 
     // ESC 取消吸取模式
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && colorPickMode) {
+        if (e.key === 'Escape' && AppState.colorPickingMode) {
             cancelColorPicking();
             showToast('已取消吸取顏色');
         }
@@ -2008,7 +2095,7 @@ function init() {
     // 在 Canvas 上點擊吸取顏色
     if (DOM.editorCanvas) {
         DOM.editorCanvas.addEventListener('click', async (e) => {
-            if (!colorPickMode) return;
+            if (!AppState.colorPickingMode) return;
 
             const page = AppState.pages[AppState.currentPageIndex];
             if (!page) return;
@@ -2021,38 +2108,32 @@ function init() {
             const x = (e.clientX - rect.left) / (displayScale * zoomLevel);
             const y = (e.clientY - rect.top) / (displayScale * zoomLevel);
 
-            // 從圖片獲取該位置的顏色
-            try {
-                const tempCanvas = document.createElement('canvas');
-                const tempCtx = tempCanvas.getContext('2d');
-                const img = new Image();
-                await new Promise((resolve, reject) => {
-                    img.onload = resolve;
-                    img.onerror = reject;
-                    img.src = page.imageData;
-                });
-                tempCanvas.width = page.width;
-                tempCanvas.height = page.height;
-                tempCtx.drawImage(img, 0, 0);
+            // 計算 Canvas 上的像素座標 (用於 getImageData)
+            const canvasX = e.clientX - rect.left;
+            const canvasY = e.clientY - rect.top;
 
-                const pixelData = tempCtx.getImageData(Math.floor(x), Math.floor(y), 1, 1).data;
-                const hexColor = '#' +
-                    pixelData[0].toString(16).padStart(2, '0') +
-                    pixelData[1].toString(16).padStart(2, '0') +
-                    pixelData[2].toString(16).padStart(2, '0');
+            // 取得 Canvas Context
+            const ctx = DOM.editorCanvas.getContext('2d', { willReadFrequently: true });
 
-                if (colorPickMode === 'text') {
-                    DOM.textColorPicker.value = hexColor;
-                    showToast(`已吸取文字顏色: ${hexColor}`);
-                } else if (colorPickMode === 'bg') {
-                    DOM.bgColorPicker.value = hexColor;
-                    showToast(`已吸取背景顏色: ${hexColor}`);
-                }
-            } catch (error) {
-                console.error('吸取顏色失敗:', error);
+            // 取得像素顏色
+            const pixel = ctx.getImageData(canvasX, canvasY, 1, 1).data;
+            const color = { r: pixel[0], g: pixel[1], b: pixel[2] };
+            const hexColor = rgbToHex(color);
+
+            // 根據模式處理
+            if (AppState.colorPickingMode === 'new_cover') {
+                // 產生新的遮蓋框
+                createCoverBox(hexColor, x, y); //使用 PDF 座標
+                showToast('已產生覆蓋遮罩，請調整位置');
+            } else if (AppState.colorPickingMode === 'text') {
+                if (DOM.textColorPicker) DOM.textColorPicker.value = hexColor;
+                showToast(`已吸取文字顏色: ${hexColor}`);
+            } else if (AppState.colorPickingMode === 'bg') {
+                if (DOM.bgColorPicker) DOM.bgColorPicker.value = hexColor;
+                showToast(`已吸取背景顏色: ${hexColor}`);
             }
 
-            // 重置吸取模式並返回對話框
+            // 重置吸取模式並返回對話框 (new_cover 模式下可能不需要返回對話框，但取消吸管狀態是必須的)
             cancelColorPicking();
         });
     }
@@ -2064,6 +2145,10 @@ function init() {
         }
     });
 
+
+
+
+
     // 鍵盤事件
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
@@ -2071,6 +2156,18 @@ function init() {
         }
         if (e.key === 'Enter' && e.ctrlKey && !DOM.editModal.classList.contains('hidden')) {
             saveEdit();
+        }
+
+        // Undo (Ctrl+Z)
+        if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+            e.preventDefault();
+            undo();
+        }
+
+        // Redo (Ctrl+Y 或 Ctrl+Shift+Z)
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
+            e.preventDefault();
+            redo();
         }
     });
 
@@ -2123,6 +2220,232 @@ async function preloadOCRLanguage() {
         console.log('OCR 語言包預載入完成！');
     } catch (error) {
         console.error('預載入 OCR 語言包失敗:', error);
+    }
+}
+
+
+// ============================================
+// Helper Functions (Moved from init)
+// ============================================
+
+/**
+ * 開始吸取顏色
+ */
+function startColorPicking(mode) {
+    AppState.colorPickingMode = mode;
+    // 暫時隱藏對話框 (只有在編輯模式下才隱藏，如果是 new_cover 則不用)
+    if (mode !== 'new_cover' && DOM.editModal) {
+        DOM.editModal.style.opacity = '0';
+        DOM.editModal.style.pointerEvents = 'none';
+    }
+    if (DOM.editorCanvas) DOM.editorCanvas.style.cursor = 'crosshair';
+    document.body.classList.add('color-picking');
+
+    let msg = '點擊圖片吸取顏色｜Ctrl+滾輪縮放｜ESC 取消';
+    if (mode === 'text') msg = '點擊圖片吸取文字顏色｜Ctrl+滾輪縮放｜ESC 取消';
+    if (mode === 'bg') msg = '點擊圖片吸取背景顏色｜Ctrl+滾輪縮放｜ESC 取消';
+    if (mode === 'new_cover') msg = '點擊圖片吸取背景色以產生遮罩｜ESC 取消';
+
+    showToast(msg);
+}
+
+/**
+ * 取消吸取模式的函數
+ */
+function cancelColorPicking() {
+    AppState.colorPickingMode = null;
+    if (DOM.editModal) {
+        DOM.editModal.style.opacity = '';
+        DOM.editModal.style.pointerEvents = '';
+    }
+    if (DOM.editorCanvas) DOM.editorCanvas.style.cursor = '';
+    document.body.classList.remove('color-picking');
+    if (DOM.pickTextColorBtn) DOM.pickTextColorBtn.classList.remove('active');
+    if (DOM.pickBgColorBtn) DOM.pickBgColorBtn.classList.remove('active');
+
+    // 回到 100% 縮放
+    setZoom(1);
+}
+
+/**
+ * 開始新增文字框 (Helper)
+ */
+function startAddText(isVertical = false) {
+    AppState.isNewBoxMode = true;
+    AppState.activeTextBoxId = null;
+
+    // 預設位置
+    const page = AppState.pages[AppState.currentPageIndex];
+    if (!page) { showToast('請先選擇頁面'); return; }
+
+    AppState.pendingNewBox = {
+        id: Date.now().toString(),
+        x: 100,
+        y: 100,
+        width: isVertical ? 60 : 300,
+        height: isVertical ? 200 : 60,
+        isVertical: isVertical,
+        fontSize: 24,
+        isBold: true,
+        color: '#000000',
+        bgColor: null,
+        text: '',
+        originalText: '',
+        isFreeFloating: true // 標記為自由浮動物件，不產生固定 Mask
+    };
+
+    if (DOM.originalText) DOM.originalText.textContent = '(新增文字)';
+    if (DOM.editTextarea) DOM.editTextarea.value = '';
+
+    // 重置選項
+    if (DOM.fontSizeSlider) { DOM.fontSizeSlider.value = 24; if (DOM.fontSizeValue) DOM.fontSizeValue.textContent = '24px'; }
+    if (DOM.textColorPicker) DOM.textColorPicker.value = '#000000';
+    if (DOM.bgColorPicker) DOM.bgColorPicker.value = '#ffffff';
+    if (DOM.boldCheckbox) DOM.boldCheckbox.checked = true;
+
+    if (DOM.editModal) {
+        showElement(DOM.editModal);
+        if (DOM.editTextarea) DOM.editTextarea.focus();
+    }
+}
+
+/**
+ * 創建覆蓋遮罩 (Helper)
+ */
+function createCoverBox(color, x, y) {
+    saveHistory();
+
+    const page = AppState.pages[AppState.currentPageIndex];
+    if (!page) return;
+
+    const newBox = {
+        id: Date.now().toString(),
+        x: x,
+        y: y,
+        width: 150,
+        height: 60,
+        text: '',
+        isCoverOnly: true,
+        isEdited: true,
+        bgColor: color,
+        isFreeFloating: true // 標記為自由浮動物件
+    };
+
+    if (!page.textBoxes) page.textBoxes = [];
+    page.textBoxes.push(newBox);
+
+    renderPageToCanvas(page);
+    renderTextOverlays(page);
+    renderTextList(page);
+    if (DOM.textBoxCount) DOM.textBoxCount.textContent = page.textBoxes.length;
+}
+
+
+// ============================================
+// 歷史紀錄管理 (History Manager) - 純前端實作
+// ============================================
+
+/**
+ * 儲存當前狀態到歷史紀錄
+ * 觸發時機：新增、修改、刪除、移動結束
+ */
+function saveHistory() {
+    // 如果沒有載入頁面，不動作
+    if (AppState.currentPageIndex === -1 || !AppState.pages[AppState.currentPageIndex]) return;
+
+    // 深拷貝當前頁面的文字框狀態
+    const currentPage = AppState.pages[AppState.currentPageIndex];
+    // 使用 JSON 序列化進行深拷貝 (確保斷開引用)
+    // 注意：因為我們是純前端，且物件結構簡單，JSON 方法是最高效安全的
+    const currentState = JSON.parse(JSON.stringify(currentPage.textBoxes || []));
+
+    // 如果歷史堆疊已滿，移除最舊的紀錄
+    if (AppState.history.length >= AppState.maxHistorySize) {
+        AppState.history.shift();
+    }
+
+    // 推入新狀態
+    AppState.history.push(currentState);
+
+    // 每次有新操作時，清空 Redo 堆疊（因為時間線分叉了）
+    AppState.redoStack = [];
+
+    updateHistoryButtons();
+    // console.log('History Saved. Stack:', AppState.history.length);
+}
+
+/**
+ * 執行上一步 (Undo)
+ */
+function undo() {
+    if (AppState.history.length === 0) return;
+
+    const page = AppState.pages[AppState.currentPageIndex];
+    if (!page) return;
+
+    // 1. 將當前狀態推入 Redo 堆疊 (以便可以 Redo 回來)
+    const currentState = JSON.parse(JSON.stringify(page.textBoxes || []));
+    AppState.redoStack.push(currentState);
+
+    // 2. 從 History 取出上一個狀態
+    const prevState = AppState.history.pop();
+
+    // 3. 恢復狀態
+    page.textBoxes = prevState;
+
+    // 4. 更新畫面
+    renderPageToCanvas(page);
+    renderTextOverlays(page);
+    renderTextList(page);
+    DOM.textBoxCount.textContent = page.textBoxes.length;
+
+    updateHistoryButtons();
+    showToast('已復原 (Undo)');
+}
+
+/**
+ * 執行下一步 (Redo)
+ */
+function redo() {
+    if (AppState.redoStack.length === 0) return;
+
+    const page = AppState.pages[AppState.currentPageIndex];
+    if (!page) return;
+
+    // 1. 將當前狀態推入 History (以便再 Undo)
+    const currentState = JSON.parse(JSON.stringify(page.textBoxes || []));
+    AppState.history.push(currentState);
+
+    // 2. 從 Redo Stack 取出下一個狀態
+    const nextState = AppState.redoStack.pop();
+
+    // 3. 恢復狀態
+    page.textBoxes = nextState;
+
+    // 4. 更新畫面
+    renderPageToCanvas(page);
+    renderTextOverlays(page);
+    renderTextList(page);
+    DOM.textBoxCount.textContent = page.textBoxes.length;
+
+    updateHistoryButtons();
+    showToast('已重做 (Redo)');
+}
+
+/**
+ * 更新按鈕狀態
+ */
+function updateHistoryButtons() {
+    if (DOM.undoBtn) {
+        DOM.undoBtn.disabled = AppState.history.length === 0;
+        DOM.undoBtn.style.opacity = AppState.history.length === 0 ? '0.5' : '1';
+        DOM.undoBtn.style.cursor = AppState.history.length === 0 ? 'not-allowed' : 'pointer';
+    }
+
+    if (DOM.redoBtn) {
+        DOM.redoBtn.disabled = AppState.redoStack.length === 0;
+        DOM.redoBtn.style.opacity = AppState.redoStack.length === 0 ? '0.5' : '1';
+        DOM.redoBtn.style.cursor = AppState.redoStack.length === 0 ? 'not-allowed' : 'pointer';
     }
 }
 
